@@ -48,11 +48,11 @@ static inline uint24_t rgb32_to_24(uint32_t px)
 }
 
 
-static inline void convert_to_24(drmModeFB *fb, uint24_t *to, void *from)
+static inline void convert_to_24(drmModeFB2 *fb, uint24_t *to, void *from)
 {
 	unsigned int len = fb->width * fb->height;
 
-	if (fb->bpp == 16) {
+	/*if (fb->bpp == 16) {
 		uint16_t *ptr = from;
 		while (len--)
 			*to++ = rgb16_to_24(*ptr++);
@@ -60,10 +60,13 @@ static inline void convert_to_24(drmModeFB *fb, uint24_t *to, void *from)
 		uint32_t *ptr = from;
 		while (len--)
 			*to++ = rgb32_to_24(*ptr++);
-	}
+	}*/
+	uint32_t *ptr = from;
+	while (len--)
+		*to++ = rgb32_to_24(*ptr++);
 }
 
-static int save_png(drmModeFB *fb, int prime_fd, const char *png_fn)
+static int save_png(drmModeFB2 *fb, int *dma_buf_fd, int nplanes, const char *png_fn)
 {
 	png_bytep *row_pointers;
 	png_structp png;
@@ -77,8 +80,8 @@ static int save_png(drmModeFB *fb, int prime_fd, const char *png_fn)
 	if (!picture)
 		return -ENOMEM;
 
-	buffer = mmap(NULL, (fb->bpp >> 3) * fb->width * fb->height,
-		      PROT_READ, MAP_PRIVATE, prime_fd, 0);
+        size_t map_size = lseek(dma_buf_fd[0], 0, SEEK_END);
+	buffer = mmap(NULL, map_size, PROT_READ, MAP_PRIVATE, dma_buf_fd[0], 0);
 	if (buffer == MAP_FAILED) {
 		ret = -errno;
 		fprintf(stderr, "Unable to mmap prime buffer\n");
@@ -141,7 +144,7 @@ out_free_png:
 out_fclose:
 	fclose(pngfile);
 out_unmap_buffer:
-	munmap(buffer, (fb->bpp >> 3) * fb->width * fb->height);
+	munmap(buffer, map_size);
 out_free_picture:
 	free(picture);
 	return ret;
@@ -154,7 +157,8 @@ int main(int argc, char **argv)
 	uint32_t fb_id, crtc_id;
 	drmModePlaneRes *plane_res;
 	drmModePlane *plane;
-	drmModeFB *fb;
+	drmModeFB2Ptr fb;
+        int *dma_buf_fd;
 	char buf[256];
 	uint64_t has_dumb;
 
@@ -216,21 +220,42 @@ int main(int argc, char **argv)
 		goto out_free_resources;
 	}
 
-	fb = drmModeGetFB(drm_fd, fb_id);
+	fb = drmModeGetFB2(drm_fd, fb_id);
 	if (!fb) {
 		fprintf(stderr, "Failed to get framebuffer %"PRIu32": %s\n",
 			fb_id, strerror(errno));
 		goto out_free_resources;
 	}
 
-	err = drmPrimeHandleToFD(drm_fd, fb->handle, O_RDONLY, &prime_fd);
+        int nplanes = 0;
+        dma_buf_fd = (int *)malloc(sizeof(int) * 4);
+        for (int i = 0; i < 4; i++) {
+          if (fb->handles[i] == 0) {
+            nplanes = i;
+            break;
+          }
+          err = drmPrimeHandleToFD(drm_fd, fb->handles[i], O_RDONLY, (dma_buf_fd + i));
+          if (err < 0) {
+            fprintf(stderr, "Failed to retrieve prime handler: %s\n",
+	            strerror(-err));
+            goto out_free_fb;
+	  }
+        }
+	printf("----------------------- look!!!! -----------------------\n");
+	/*err = drmPrimeHandleToFD(drm_fd, fb->handle, O_RDONLY, &prime_fd);
 	if (err < 0) {
 		fprintf(stderr, "Failed to retrieve prime handler: %s\n",
 			strerror(-err));
 		goto out_free_fb;
-	}
+	}*/
 
-	err = save_png(fb, prime_fd, argv[1]);
+	/*err = save_png(fb, prime_fd, argv[1]);
+	if (err < 0) {
+		fprintf(stderr, "Failed to take screenshot: %s\n",
+			strerror(-err));
+		goto out_close_prime_fd;
+	}*/
+	err = save_png(fb, dma_buf_fd, nplanes, argv[1]);
 	if (err < 0) {
 		fprintf(stderr, "Failed to take screenshot: %s\n",
 			strerror(-err));
@@ -242,7 +267,7 @@ int main(int argc, char **argv)
 out_close_prime_fd:
 	close(prime_fd);
 out_free_fb:
-	drmModeFreeFB(fb);
+	drmModeFreeFB2(fb);
 out_free_resources:
 	drmModeFreePlaneResources(plane_res);
 out_close_fd:
